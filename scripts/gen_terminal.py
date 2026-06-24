@@ -11,6 +11,7 @@ never needs an image library at runtime.
 
 import html
 import json
+import time
 import urllib.request
 
 # --- ndl.au enso logo, rasterised to a density ramp (monospace-safe glyphs) --
@@ -69,10 +70,21 @@ AFS, ALH, ACW = 11, 14, 6.6       # logo font
 GAP, WRAP = 22, 74
 
 
-def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "ndl-profile-readme"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.load(r)
+def fetch(url, attempts=3):
+    """GET + parse JSON, retrying transient failures with backoff. Raises after
+    the final attempt so the caller can keep the last-good card rather than
+    publish placeholders."""
+    last = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ndl-profile-readme"})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                return json.load(r)
+        except Exception as err:  # network/timeout/parse — retry, then re-raise
+            last = err
+            if i < attempts - 1:
+                time.sleep(2**i)  # 1s, 2s
+    raise last
 
 
 def trunc(s, n=46):
@@ -81,25 +93,33 @@ def trunc(s, n=46):
 
 
 def live():
+    """(playing, reading, extra) from ndl.au. A failed *fetch* propagates so the
+    caller keeps the last-good card; a fetched-but-odd payload just falls back to
+    the placeholder for that one line."""
     playing, reading, extra = "—", "—", 0
+
+    spotify = fetch("https://ndl.au/api/spotify")  # raises on failure -> abort
     try:
-        rt = (fetch("https://ndl.au/api/spotify") or {}).get("recent_tracks") or []
+        rt = (spotify or {}).get("recent_tracks") or []
         if rt:
             playing = trunc(f"{rt[0]['track_name']} — {rt[0]['artist_name']}")
     except Exception:
         pass
+
+    books = fetch("https://ndl.au/api/books")  # raises on failure -> abort
     try:
-        cur = [b for b in (fetch("https://ndl.au/api/books") or []) if b.get("status") == "reading"]
+        cur = [b for b in (books or []) if b.get("status") == "reading"]
         cur.sort(key=lambda b: b.get("date_started") or "", reverse=True)
         if cur:
             book = cur[0].get("book") or {}
             title = book.get("title", "")
-            authors = book.get("authors") or []  # note: plural, list of names
+            authors = book.get("authors") or []  # plural, list of names
             surname = authors[0].split()[-1] if authors and authors[0] else ""
             reading = trunc(f"{title} — {surname}" if surname else title) or "—"
             extra = len(cur) - 1
     except Exception:
         pass
+
     return playing, reading, extra
 
 
@@ -227,8 +247,17 @@ def build():
 
 if __name__ == "__main__":
     import os
+    import sys
+
+    try:
+        svg = build()
+    except Exception as err:  # a fetch failed after retries
+        # Fail safe: leave assets/terminal.svg untouched so the profile keeps
+        # its last-good card. The empty diff means the workflow makes no commit.
+        print(f"::warning::ndl.au fetch failed; kept last-good terminal.svg ({err})")
+        sys.exit(0)
 
     out = os.path.join(os.path.dirname(__file__), "..", "assets", "terminal.svg")
     with open(out, "w", encoding="utf-8") as f:
-        f.write(build())
+        f.write(svg)
     print(f"wrote {os.path.normpath(out)}")

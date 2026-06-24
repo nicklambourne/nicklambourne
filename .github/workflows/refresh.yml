@@ -25,6 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Test the generator
+        run: python3 -m unittest discover -s tests # gate the refresh on green tests
+
       - name: Regenerate terminal.svg
         run: python3 scripts/gen_terminal.py # stdlib only, no install step
 
