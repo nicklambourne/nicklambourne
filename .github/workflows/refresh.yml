@@ -1,0 +1,41 @@
+name: refresh terminal card
+
+# Regenerates assets/terminal.svg with the latest reading/listening pulled
+# from ndl.au's public JSON. Commits only when the card actually changes.
+on:
+  schedule:
+    - cron: '0 */6 * * *' # every 6 hours (best-effort; GitHub cron can drift)
+  push:
+    branches: [main]
+    paths: # not assets/** -> the bot's own SVG commit never retriggers this
+      - 'scripts/gen_terminal.py'
+      - '.github/workflows/refresh.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Regenerate terminal.svg
+        run: python3 scripts/gen_terminal.py # stdlib only, no install step
+
+      - name: Commit if changed
+        run: |
+          if [ -n "$(git status --porcelain assets/terminal.svg)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add assets/terminal.svg
+            git commit -m "chore: refresh terminal card"
+            git push
+          else
+            echo "terminal.svg unchanged — nothing to commit"
+          fi
