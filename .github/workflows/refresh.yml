@@ -4,7 +4,7 @@ name: refresh terminal card
 # from ndl.au's public JSON. Commits only when the card actually changes.
 on:
   schedule:
-    - cron: '0 */6 * * *' # every 6 hours (best-effort; GitHub cron can drift)
+    - cron: '17 6 * * *' # once a day at 06:17 UTC (best-effort; GitHub cron can drift)
   push:
     branches: [main]
     paths: # not assets/** -> the bot's own SVG commit never retriggers this

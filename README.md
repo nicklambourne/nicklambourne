@@ -1,4 +1,4 @@
-<!-- assets/terminal.svg is regenerated ~every 6h by .github/workflows/refresh.yml -->
+<!-- assets/terminal.svg is regenerated daily by .github/workflows/refresh.yml -->
 
 ![nicklambourne](assets/terminal.svg)
 
