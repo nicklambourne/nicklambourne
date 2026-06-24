@@ -92,9 +92,11 @@ def live():
         cur = [b for b in (fetch("https://ndl.au/api/books") or []) if b.get("status") == "reading"]
         cur.sort(key=lambda b: b.get("date_started") or "", reverse=True)
         if cur:
-            # /api/books enriches `author` inconsistently (often null), so
-            # show just the title — the `+N` covers the other current reads.
-            reading = trunc((cur[0].get("book") or {}).get("title", "")) or "—"
+            book = cur[0].get("book") or {}
+            title = book.get("title", "")
+            authors = book.get("authors") or []  # note: plural, list of names
+            surname = authors[0].split()[-1] if authors and authors[0] else ""
+            reading = trunc(f"{title} — {surname}" if surname else title) or "—"
             extra = len(cur) - 1
     except Exception:
         pass
