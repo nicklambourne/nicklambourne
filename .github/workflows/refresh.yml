@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   refresh:
-    runs-on: nicklambourne # ARC scale set on the local CI box; stdlib python3 ships in the default runner image
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
