@@ -1,7 +1,12 @@
 name: refresh terminal card
 
-# Regenerates assets/terminal.svg with the latest reading/listening pulled
-# from ndl.au's public JSON. Commits only when the card actually changes.
+# Regenerates assets/terminal.svg with the latest reading/listening from
+# ndl.au's public GET /api/public/now. Commits only when the card changes.
+#
+# The generator exits nonzero when a live line could not be refreshed, so a
+# broken source turns this job RED and files an issue. It previously swallowed
+# fetch failures and exited 0, which is how the card sat stale for weeks with
+# every scheduled run showing green.
 on:
   schedule:
     - cron: '17 6 * * *' # once a day at 06:17 UTC (best-effort; GitHub cron can drift)
@@ -14,6 +19,7 @@ on:
 
 permissions:
   contents: write
+  issues: write # to file/close the "refresh is broken" tracking issue
 
 concurrency:
   group: refresh
@@ -21,7 +27,8 @@ concurrency:
 
 jobs:
   refresh:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # public repo -> GitHub-hosted only, never self-hosted
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -29,16 +36,65 @@ jobs:
         run: python3 -m unittest discover -s tests # gate the refresh on green tests
 
       - name: Regenerate terminal.svg
-        run: python3 scripts/gen_terminal.py # stdlib only, no install step
+        id: gen
+        # Nonzero means at least one live line is stale; the card is still
+        # written (last-good values kept), so continue on to commit what did
+        # update and fail the job at the end.
+        run: |
+          set +e
+          python3 scripts/gen_terminal.py
+          echo "status=$?" >> "$GITHUB_OUTPUT"
 
       - name: Commit if changed
         run: |
-          if [ -n "$(git status --porcelain assets/terminal.svg)" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add assets/terminal.svg
-            git commit -m "chore: refresh terminal card"
-            git push
-          else
+          set -euo pipefail
+          if [ -z "$(git status --porcelain assets/terminal.svg)" ]; then
             echo "terminal.svg unchanged — nothing to commit"
+            exit 0
           fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # live.json carries the last-good live values between runs (each run
+          # is a fresh checkout), so it rides along with every card change.
+          git add assets/terminal.svg assets/live.json
+          git commit -m "chore: refresh terminal card"
+          # Retry around a concurrent push to main rather than losing the run.
+          for attempt in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "push failed (attempt $attempt) — rebasing on origin/main"
+            git pull --rebase --autostash origin main
+          done
+          echo "::error::could not push the refreshed card after 3 attempts"
+          exit 1
+
+      - name: Report a stale card
+        if: steps.gen.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          body="$(cat refresh-errors.md)"$'\n\n'"Run: $RUN_URL"
+          # One rolling issue: comment on the open one rather than filing a new
+          # issue every day the source stays broken.
+          existing="$(gh issue list --label refresh-broken --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh label create refresh-broken --color d73a4a \
+              --description "The scheduled terminal-card refresh is failing" 2>/dev/null || true
+            gh issue create --title "Terminal card refresh is failing" \
+              --label refresh-broken --body "$body"
+          fi
+          exit 1 # the whole point: a stale card is a red run, not a green one
+
+      - name: Close the tracking issue once the card is fresh again
+        if: steps.gen.outputs.status == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for n in $(gh issue list --label refresh-broken --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Refresh succeeded — both live lines are current again."
+          done
