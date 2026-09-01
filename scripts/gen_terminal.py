@@ -2,17 +2,37 @@
 """Render assets/terminal.svg — a neofetch-style terminal card for the profile
 README.
 
-Live `reading` / `playing` lines come from two public ndl.au endpoints (no
-auth, no secrets): https://ndl.au/api/spotify and https://ndl.au/api/books.
-Everything else is static. Stdlib only, so the GitHub Action needs no install
-step. The ndl.au logo is pre-rasterised to ASCII (see LOGO) so this script
-never needs an image library at runtime.
+Live `reading` / `playing` lines come from https://ndl.au/api/public/now — a
+public, no-auth endpoint on ndl.au built for this card, returning
+`{playing, reading, degraded?}`. It replaced the card's original sources
+(/api/spotify, deleted; /api/books, admin-gated) whose disappearance left this
+card stale for weeks, so the contract here is: degrade gracefully, but NEVER
+fail silently.
+
+  - Each line refreshes independently. The endpoint reports a half-outage as
+    `degraded: ["playing"]` rather than failing the whole request, so one
+    dead source can't hold up the other line.
+  - Last-good values persist in assets/live.json. A failed line keeps its
+    last-good value on the card instead of a placeholder.
+  - "Legitimately empty" is distinguished from "broken": a null field is a
+    real answer (nothing in progress), a null field named in `degraded` is an
+    outage. Only the latter is an error.
+  - Any failure exits nonzero with ::error:: annotations and a
+    refresh-errors.md summary, so the workflow goes red and files an issue —
+    while still writing the best card it can.
+
+Stdlib only, so the GitHub Action needs no install step. The ndl.au logo is
+pre-rasterised to ASCII (see LOGO) so this script never needs an image
+library at runtime.
 """
 
 import html
 import json
+import os
+import sys
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 # --- ndl.au enso logo, rasterised to a density ramp (monospace-safe glyphs) --
 LOGO = (
@@ -69,18 +89,38 @@ FS, LH, CW = 14, 20, 8.4          # body font
 AFS, ALH, ACW = 11, 14, 6.6       # logo font
 GAP, WRAP = 22, 74
 
+# --- live source ------------------------------------------------------------
+NOW_URL = "https://ndl.au/api/public/now"
+UA = "ndl-profile-readme (github.com/nicklambourne/nicklambourne)"
+DASH = "—"
 
-def fetch(url, attempts=3):
-    """GET + parse JSON, retrying transient failures with backoff. Raises after
-    the final attempt so the caller can keep the last-good card rather than
-    publish placeholders."""
+ASSETS = os.path.join(os.path.dirname(__file__), "..", "assets")
+SVG_PATH = os.path.join(ASSETS, "terminal.svg")
+STATE_PATH = os.path.join(ASSETS, "live.json")
+# Written next to the checkout (not under assets/, so it is never committed);
+# the workflow folds it into the failure issue.
+ERRORS_PATH = os.path.join(os.path.dirname(__file__), "..", "refresh-errors.md")
+
+
+class SourceError(Exception):
+    """A live source failed, or answered with something we can't read."""
+
+
+def fetch_now(url=None, attempts=3):
+    """GET + parse /api/public/now, retrying transient failures with backoff.
+    Raises after the final attempt so the caller can keep last-good values
+    rather than publish placeholders. `url` resolves at call time so a test
+    (or a staging run) can point this at another host."""
     last = None
     for i in range(attempts):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "ndl-profile-readme"})
-            with urllib.request.urlopen(req, timeout=12) as r:
-                return json.load(r)
-        except Exception as err:  # network/timeout/parse — retry, then re-raise
+            req = urllib.request.Request(url or NOW_URL, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                payload = json.load(r)
+            if not isinstance(payload, dict):
+                raise SourceError(f"expected a JSON object, got {type(payload).__name__}")
+            return payload
+        except Exception as err:  # network/timeout/HTTP status/parse
             last = err
             if i < attempts - 1:
                 time.sleep(2**i)  # 1s, 2s
@@ -92,35 +132,104 @@ def trunc(s, n=46):
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
-def live():
-    """(playing, reading, extra) from ndl.au. A failed *fetch* propagates so the
-    caller keeps the last-good card; a fetched-but-odd payload just falls back to
-    the placeholder for that one line."""
-    playing, reading, extra = "—", "—", 0
+def _field(payload, name):
+    """One field of the /api/public/now response, validated. Returns the dict
+    or None; raises SourceError when the endpoint flagged the source as
+    degraded, or when the field isn't the shape the contract promises — both
+    mean "don't overwrite the last-good value with this"."""
+    degraded = payload.get("degraded") or []
+    if isinstance(degraded, list) and name in degraded:
+        raise SourceError(f"ndl.au reported its {name} source as degraded")
+    value = payload.get(name)
+    if value is None or isinstance(value, dict):
+        return value
+    raise SourceError(f"expected `{name}` to be an object or null, got {type(value).__name__}")
 
-    spotify = fetch("https://ndl.au/api/spotify")  # raises on failure -> abort
+
+def format_playing(payload):
+    """The playing line as "track — artist", or None when nothing is playing.
+    A track with no name or artist is a broken record, not an empty one."""
+    track = _field(payload, "playing")
+    if track is None:
+        return None
+    name, artist = track.get("track"), track.get("artist")
+    if not name or not artist:
+        raise SourceError(f"`playing` is missing track or artist: {track!r}")
+    return trunc(f"{name} {DASH} {artist}")
+
+
+def format_reading(payload):
+    """(reading, extra) as "title — surname" plus the count of other books in
+    progress, or (None, 0) when nothing is being read."""
+    book = _field(payload, "reading")
+    if book is None:
+        return None, 0
+    title = book.get("title")
+    if not title:
+        raise SourceError(f"`reading` is missing its title: {book!r}")
+    authors = book.get("authors") or []
+    surname = authors[0].split()[-1] if authors and authors[0].strip() else ""
+    extra = book.get("also_reading")
+    if not isinstance(extra, int) or extra < 0:
+        extra = 0  # a bad count shouldn't cost us an otherwise-good title
+    return trunc(f"{title} {DASH} {surname}" if surname else title), extra
+
+
+def load_state(path=STATE_PATH):
+    """Last-good live values. Missing/corrupt state is just 'no history'."""
     try:
-        rt = (spotify or {}).get("recent_tracks") or []
-        if rt:
-            playing = trunc(f"{rt[0]['track_name']} — {rt[0]['artist_name']}")
-    except Exception:
-        pass
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
-    books = fetch("https://ndl.au/api/books")  # raises on failure -> abort
+
+def save_state(values, path=STATE_PATH):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(values, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def refresh(state):
+    """Refresh both live lines from one /api/public/now call. Returns
+    (values, errors): values always holds something renderable (fresh, else
+    last-good, else DASH), and errors maps a line name to the exception that
+    kept it stale.
+
+    A request that fails outright stalls both lines; past that, each line is
+    derived independently, so a `degraded` or malformed field costs only its
+    own line."""
+    extra = state.get("extra", 0)
+    values = {
+        "playing": state.get("playing") or DASH,
+        "reading": state.get("reading") or DASH,
+        "extra": extra if isinstance(extra, int) and extra >= 0 else 0,
+        "updated": dict(state.get("updated") or {}),
+    }
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
     try:
-        cur = [b for b in (books or []) if b.get("status") == "reading"]
-        cur.sort(key=lambda b: b.get("date_started") or "", reverse=True)
-        if cur:
-            book = cur[0].get("book") or {}
-            title = book.get("title", "")
-            authors = book.get("authors") or []  # plural, list of names
-            surname = authors[0].split()[-1] if authors and authors[0] else ""
-            reading = trunc(f"{title} — {surname}" if surname else title) or "—"
-            extra = len(cur) - 1
-    except Exception:
-        pass
+        payload = fetch_now()
+    except Exception as err:
+        return values, {"playing": err, "reading": err}
 
-    return playing, reading, extra
+    errors = {}
+    try:
+        values["playing"] = format_playing(payload) or DASH
+        values["updated"]["playing"] = now
+    except Exception as err:
+        errors["playing"] = err
+
+    try:
+        reading, extra = format_reading(payload)
+        values["reading"] = reading or DASH
+        values["extra"] = extra
+        values["updated"]["reading"] = now
+    except Exception as err:
+        errors["reading"] = err
+
+    return values, errors
 
 
 def wrap(text, width):
@@ -158,8 +267,7 @@ class Canvas:
         self.els.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w}" height="{h}" fill="{fill}"/>')
 
 
-def build():
-    playing, reading, extra = live()
+def build(playing, reading, extra):
     c = Canvas()
     top = TB + 18
 
@@ -245,19 +353,37 @@ def build():
     )
 
 
+def main(svg_path=SVG_PATH, state_path=STATE_PATH, errors_path=ERRORS_PATH):
+    state = load_state(state_path)
+    values, errors = refresh(state)
+
+    # Always render the best card we have — a failed line keeps its last-good
+    # value — and only then report failure, so partial updates still ship.
+    with open(svg_path, "w", encoding="utf-8") as f:
+        f.write(build(values["playing"], values["reading"], values["extra"]))
+    save_state(values, state_path)
+    print(f"wrote {os.path.normpath(svg_path)}")
+
+    if not errors:
+        return 0
+    lines = []
+    for name in sorted(errors):
+        err = errors[name]
+        last = values["updated"].get(name, "never")
+        msg = " ".join(
+            f"`{name}` refresh failed: {type(err).__name__}: {err} "
+            f"(card keeps its last-good value, recorded {last})".split()
+        )
+        print(f"::error::{msg}")
+        lines.append(f"- {msg}")
+    with open(errors_path, "w", encoding="utf-8") as f:
+        f.write(
+            "The scheduled terminal-card refresh could not update every live line:\n\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+    return 1
+
+
 if __name__ == "__main__":
-    import os
-    import sys
-
-    try:
-        svg = build()
-    except Exception as err:  # a fetch failed after retries
-        # Fail safe: leave assets/terminal.svg untouched so the profile keeps
-        # its last-good card. The empty diff means the workflow makes no commit.
-        print(f"::warning::ndl.au fetch failed; kept last-good terminal.svg ({err})")
-        sys.exit(0)
-
-    out = os.path.join(os.path.dirname(__file__), "..", "assets", "terminal.svg")
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(svg)
-    print(f"wrote {os.path.normpath(out)}")
+    sys.exit(main())
