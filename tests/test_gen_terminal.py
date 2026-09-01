@@ -13,6 +13,8 @@ what left the card silently stale for weeks.
 Run: python3 -m unittest discover -s tests
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -224,11 +226,21 @@ class BuildOutput(unittest.TestCase):
 class Main(unittest.TestCase):
     """The exit code is the whole point: a stale line must turn the run red."""
 
+    @staticmethod
+    def _main(*args, fetch):
+        """Run main() with its stdout swallowed. These cases deliberately walk
+        the failure path, which prints `::error::` — and GitHub turns anything
+        a step prints in that form into a run annotation. Letting them through
+        would hang error annotations off every GREEN refresh, which is how you
+        teach yourself to ignore them (the same way the old ::warning:: got
+        ignored)."""
+        with mock.patch.object(gt, "fetch_now", fetch), \
+             contextlib.redirect_stdout(io.StringIO()):
+            return gt.main(*args)
+
     def _run(self, d, fetch):
         svg, state, errs = (os.path.join(d, n) for n in ("terminal.svg", "live.json", "errors.md"))
-        with mock.patch.object(gt, "fetch_now", fetch):
-            code = gt.main(svg, state, errs)
-        return code, svg, state, errs
+        return self._main(svg, state, errs, fetch=fetch), svg, state, errs
 
     @staticmethod
     def _read(path):
@@ -257,10 +269,10 @@ class Main(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             code, _, state, _ = self._run(d, lambda: NOW)
             self.assertEqual(code, 0)
-            with mock.patch.object(gt, "fetch_now", mock.Mock(side_effect=OSError("down"))):
-                code = gt.main(
-                    os.path.join(d, "terminal.svg"), state, os.path.join(d, "errors.md")
-                )
+            code = self._main(
+                os.path.join(d, "terminal.svg"), state, os.path.join(d, "errors.md"),
+                fetch=mock.Mock(side_effect=OSError("down")),
+            )
             self.assertEqual(code, 1)
             # Last-good values are still there for the next run to fall back on.
             self.assertEqual(json.loads(self._read(state))["playing"], "Animal Rights — deadmau5")
