@@ -79,7 +79,7 @@ EARLIER = [
     "Finance, and Psychology.",
 ]
 MADE = [
-    ("slackblocks", "ergonomic Slack Block Kit for Python · 2.8M+ downloads"),
+    ("slackblocks", "ergonomic Slack Block Kit for Python · 3.3M+ downloads"),
     ("wavebg", "audio-reactive Metal live-wallpaper app for macOS"),
     ("rules_latex", "reproducible LaTeX builds in Bazel / Tectonic"),
     ("elpis", "speech recognition for low-resource & Indigenous languages"),
