@@ -62,12 +62,15 @@ SWATCHES = ["#f05138", "#e3b341", "#3fb950", "#39c5cf", "#58a6ff", "#bc8cff"]
 
 # --- static copy ------------------------------------------------------------
 NOW = (
-    "Engineering Manager (AI) at Canva. I founded and lead the Evaluation "
-    "Platform team — the tooling Canva uses to judge its generative AI, "
-    'including a head-to-head "arena" across text, image, video, audio and 3D. '
-    "Bringing the ergonomics of pytest to non-deterministic AI."
+    "Staff AI Operations Engineer at NEOS, an Australian life insurer. "
+    "I work on running AI reliably in production: evaluation, "
+    "observability and the operational tooling around models."
 )
 EARLIER = [
+    "Engineering Manager (AI) at Canva, where I founded and led the "
+    "Evaluation Platform team: the tooling Canva uses to judge its "
+    'generative AI, including a head-to-head "arena" across text, image, '
+    "video, audio and 3D.",
     "Senior ML Engineer at Canva building out the ML platform, and a "
     "software-engineering intern before that.",
     "Research engineer at UQ, where I architected Elpis.",
@@ -282,8 +285,8 @@ def build(playing, reading, extra):
     info = [
         [("nicklambourne", GREEN)],
         [("─" * 21, RULE)],
-        [("role", LABEL), ("    Engineering Manager (AI) @ Canva", FG)],
-        [("focus", LABEL), ("   measuring generative-AI quality at scale", FG)],
+        [("role", LABEL), ("    Staff AI Operations Engineer @ NEOS", FG)],
+        [("focus", LABEL), ("   AI strategy development and productionisation", FG)],
         [("based", LABEL), ("   Sydney, Australia", FG)],
         [("─ live " + "─" * 14, DIM)],
         [("reading ", CYAN), (reading, FG)] + ([(f"  +{extra}", DIM)] if extra > 0 else []),
